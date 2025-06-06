@@ -1,0 +1,2 @@
+(test
+ (name test_sparse_tensor_compiler))

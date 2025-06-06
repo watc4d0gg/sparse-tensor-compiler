@@ -1,0 +1,12 @@
+; Frontend
+
+(library
+ (name frontend)
+ (wrapped false))
+
+; Lexing and parsing
+
+(ocamllex lexer)
+
+(menhir
+ (modules parser))

@@ -1,0 +1,6 @@
+; Main entrypoint
+
+(executable
+ (name main)
+ (public_name sparse-tensor-compiler)
+ (libraries mlirml.mlir frontend))
