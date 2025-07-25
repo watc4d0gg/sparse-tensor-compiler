@@ -1,11 +1,11 @@
 open Result
-open Einsum
+open Core
 open Lexing
+module Parser = Parser.Make (GlobalEnvironment)
 
 let lexer_position lexbuf =
   let pos = lexbuf.lex_curr_p in
   Printf.sprintf "%s:%d:%d" pos.pos_fname pos.pos_lnum (pos.pos_cnum - pos.pos_bol + 1)
-
 
 let parse_ast filename =
   let* in_file =
@@ -18,12 +18,13 @@ let parse_ast filename =
     try Parser.prog Lexer.read lexbuf |> ok with
     | SyntaxError msg ->
       In_channel.close in_file;
-      error (Printf.sprintf "%s: %s" (lexer_position lexbuf) msg)
+      error (Printf.sprintf "%s: ParseError: %s" (lexer_position lexbuf) msg)
     | Parser.Error ->
       In_channel.close in_file;
-      error (Printf.sprintf "%s: syntax error" (lexer_position lexbuf))
+      error
+        (Printf.sprintf
+           "%s: ParseError: Unspecified syntax error"
+           (lexer_position lexbuf))
   in
   In_channel.close in_file;
-  let* _ = check_tensors Set.empty ast in
-  let* _ = check_formats Map.empty ast in
   ok ast

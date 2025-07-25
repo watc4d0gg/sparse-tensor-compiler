@@ -3,4 +3,5 @@
 (executable
  (name main)
  (public_name sparse-tensor-compiler)
- (libraries mlirml.mlir frontend))
+ (modules main)
+ (libraries mlirml core frontend ir))

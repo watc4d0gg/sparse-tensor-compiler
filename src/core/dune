@@ -1,0 +1,7 @@
+; Core library
+
+(library
+ (name core)
+ (preprocess
+  (pps ppx_deriving.ord))
+ (libraries mlirml))

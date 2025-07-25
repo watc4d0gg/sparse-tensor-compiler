@@ -1,0 +1,33 @@
+type token =
+  | UNORDERED
+  | TIMES
+  | TENSOR_DECL
+  | STRUCT_OF_ARRAYS
+  | STRUCTURED
+  | SINGLETON
+  | RPAREN
+  | RBRACKET
+  | RBRACE
+  | PLUS
+  | NON_UNIQUE
+  | NAMED_FORMAT of string
+  | MOD
+  | MINUS
+  | LPAREN
+  | LOOSE_COMPRESSED
+  | LEVELS_DECL
+  | LBRACKET
+  | LBRACE
+  | ID of string
+  | FLOORDIV
+  | EQUALS
+  | EOF
+  | DIM_ID of int
+  | DENSE
+  | CONST of float
+  | COMPRESSED
+  | COMMA
+  | COLON
+  | CEILDIV
+  | BATCH
+  | ARROW

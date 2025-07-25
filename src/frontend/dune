@@ -2,11 +2,12 @@
 
 (library
  (name frontend)
- (wrapped false))
+ (libraries mlirml core))
 
 ; Lexing and parsing
 
 (ocamllex lexer)
 
 (menhir
- (modules parser))
+ (modules parser)
+ (flags --external-tokens Tokens))
