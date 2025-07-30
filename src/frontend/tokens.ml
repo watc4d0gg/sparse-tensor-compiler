@@ -2,6 +2,8 @@ type token =
   | UNORDERED
   | TIMES
   | TENSOR_DECL
+  | MATRIX_DECL
+  | VECTOR_DECL
   | STRUCT_OF_ARRAYS
   | STRUCTURED
   | SINGLETON
@@ -13,9 +15,10 @@ type token =
   | NAMED_FORMAT of string
   | MOD
   | MINUS
+  | LT
+  | GT
   | LPAREN
   | LOOSE_COMPRESSED
-  | LEVELS_DECL
   | LBRACKET
   | LBRACE
   | ID of string

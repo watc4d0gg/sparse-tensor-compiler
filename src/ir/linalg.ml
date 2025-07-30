@@ -1,15 +1,9 @@
 open Mlir
 open Mlir.Ir
 open Core
+open! Tensor_runtime
 
 exception LoweringError of string
-
-let with_module ctx init =
-  let location = Location.unknown ctx in
-  let m = Module.empty location in
-  init m#body location;
-  assert m#to_operation#verify;
-  m
 
 module Linalg (Env : Environment) = struct
   include Env
@@ -104,11 +98,11 @@ module Linalg (Env : Environment) = struct
       @ List.filter (fun index -> List.mem index sparse_order |> not) total_order
   end
 
-  let element_type = Type.float64 context
-
-  let rec to_arith loc body output_rank access_counter = function
+  let rec to_arith location body output_rank access_counter = function
     | `Constant c ->
-      let const = Arith.constant (FloatAttr.get element_type c loc) loc context in
+      let const =
+        Arith.constant (FloatAttr.get element_type c location) location context
+      in
       body#append_operation const;
       (const#result 0 :> Value.t), 0
     | `Access (_, subscript) ->
@@ -116,11 +110,11 @@ module Linalg (Env : Environment) = struct
       access_counter := index + 1;
       (body#argument index :> Value.t), List.length subscript
     | `Unary (op, expr) as unary ->
-      let value, rank = to_arith loc body output_rank access_counter expr in
+      let value, rank = to_arith location body output_rank access_counter expr in
       (match op with
        | TensorExpr.ADD -> value, rank
        | TensorExpr.SUB ->
-         let negation = Arith.negf (body#argument 0) loc in
+         let negation = Arith.negf (body#argument 0) location in
          body#append_operation negation;
          (negation#result 0 :> Value.t), rank
        | _ ->
@@ -130,19 +124,23 @@ module Linalg (Env : Environment) = struct
               (TensorExpr.repr unary))
          |> raise)
     | `Binary (op, left, right) ->
-      let left_value, left_rank = to_arith loc body output_rank access_counter left
-      and right_value, right_rank = to_arith loc body output_rank access_counter right in
+      let left_value, left_rank = to_arith location body output_rank access_counter left
+      and right_value, right_rank =
+        to_arith location body output_rank access_counter right
+      in
       let left_value =
         if left_rank > output_rank && left_rank > right_rank
         then (
-          let zero = Arith.constant (FloatAttr.get element_type 0.0 loc) loc context in
+          let zero =
+            Arith.constant (FloatAttr.get element_type 0.0 location) location context
+          in
           body#append_operation zero;
           let reduction =
             SparseTensor.reduce
               left_value
               (zero#result 0)
               (zero#result 0)
-              loc
+              location
               ~init:(fun body -> [ body#argument 0 ])
           in
           body#append_operation reduction;
@@ -151,14 +149,16 @@ module Linalg (Env : Environment) = struct
       and right_value =
         if right_rank > output_rank && left_rank < right_rank
         then (
-          let zero = Arith.constant (FloatAttr.get element_type 0.0 loc) loc context in
+          let zero =
+            Arith.constant (FloatAttr.get element_type 0.0 location) location context
+          in
           body#append_operation zero;
           let reduction =
             SparseTensor.reduce
               right_value
               (zero#result 0)
               (zero#result 0)
-              loc
+              location
               ~init:(fun body -> [ body#argument 0 ])
           in
           body#append_operation reduction;
@@ -167,9 +167,9 @@ module Linalg (Env : Environment) = struct
       in
       let operation =
         match op with
-        | TensorExpr.ADD -> Arith.addf left_value right_value loc
-        | TensorExpr.SUB -> Arith.subf left_value right_value loc
-        | TensorExpr.MUL -> Arith.mulf left_value right_value loc
+        | TensorExpr.ADD -> Arith.addf left_value right_value location
+        | TensorExpr.SUB -> Arith.subf left_value right_value location
+        | TensorExpr.MUL -> Arith.mulf left_value right_value location
       in
       body#append_operation operation;
       ( (operation#result 0 :> Value.t)
@@ -181,26 +181,13 @@ module Linalg (Env : Environment) = struct
 
   let lower ast =
     let tensors = Einsum.tensors ast
-    and kernels = Einsum.assignments ast
-    and index = Type.index context in
-    with_module context (fun body loc ->
-      let tensors =
-        StringMap.map
-          (fun format ->
-             RankedTensorType.get
-               (List.init format#level_rank (fun _ -> ShapedType.Dynamic))
-               element_type
-               (if List.for_all has_dense_semantics (List.init format#level_rank format#level_type) then None else Some format)
-               loc)
-          tensors
-      in
-      let output_order =
-        List.map (fun (`Assign (`Access (output, _), _)) -> output) kernels
-      in
-      let input_order, input_types =
-        List.fold_left (fun map out -> StringMap.remove out map) tensors output_order
-        |> StringMap.to_list
-        |> List.split
+    and kernels = Einsum.assignments ast in
+    let input_order, output_order = Einsum.inputs_and_outputs kernels in
+    with_module ~init:(fun body ->
+      let dense_output_order =
+        List.filter
+          (fun output -> (StringMap.find output tensors)#encoding |> Option.is_none)
+          output_order
       in
       body#append_operation
       @@ Func.func
@@ -208,13 +195,22 @@ module Linalg (Env : Environment) = struct
            (StringAttr.get context "kernels")
            (FunctionType.get
               context
-              input_types
+              (List.map (fun input -> StringMap.find input tensors) input_order
+               @ List.map (fun output -> StringMap.find output tensors) dense_output_order
+              )
               (List.map (fun name -> StringMap.find name tensors) output_order)
             |> TypedAttr.get)
            []
-           loc
+           location
            ~init:(fun body ->
-             let last_output_results = ref StringMap.empty in
+             let last_output_results =
+               ref
+                 (List.mapi
+                    (fun i output ->
+                       output, (body#argument (List.length input_order + i) :> Value.t))
+                    dense_output_order
+                  |> StringMap.of_list)
+             in
              List.iter
                (fun (`Assign (`Access (output, _), expr) as kernel) ->
                   let num_loops = Einsum.num_loops kernel
@@ -233,15 +229,15 @@ module Linalg (Env : Environment) = struct
                       let dims =
                         List.init output_type#rank (fun i ->
                           let constant =
-                            Arith.constant (IntegerAttr.get index i) loc context
+                            Arith.constant (IntegerAttr.get index_type i) location context
                           in
                           body#append_operation constant;
                           constant#result 0)
                       in
-                      let empty = Tensor.empty dims output_type loc in
+                      let empty = Tensor.empty dims output_type location in
                       body#append_operation empty;
                       (* remember the last result for this output tensor *)
-                      let last_result = empty#result 0 in
+                      let last_result = (empty#result 0 :> Value.t) in
                       last_output_results
                       := StringMap.add output last_result !last_output_results;
                       last_result
@@ -261,22 +257,102 @@ module Linalg (Env : Environment) = struct
                       (List.tl indexing_maps @ [ List.hd indexing_maps ])
                       (List.init num_loops (fun i ->
                          if IntSet.mem i parallel_loops then "parallel" else "reduction"))
-                      loc
+                      location
                       ~init:(fun body ->
                         let value, _ =
-                          to_arith loc body (IntSet.cardinal parallel_loops) (ref 0) expr
+                          to_arith
+                            location
+                            body
+                            (IntSet.cardinal parallel_loops)
+                            (ref 0)
+                            expr
                         in
                         let reduce =
-                          Arith.addf value (body#argument (List.length input_values)) loc
+                          Arith.addf
+                            value
+                            (body#argument (List.length input_values))
+                            location
                         in
                         body#append_operation reduce;
                         [ (reduce#result 0 :> Value.t) ])
                   in
                   body#append_operation kernel;
                   last_output_results
-                  := StringMap.add output (kernel#result 0) !last_output_results)
+                  := StringMap.add
+                       output
+                       (kernel#result 0 :> Value.t)
+                       !last_output_results)
                kernels;
              List.map
                (fun output -> StringMap.find output !last_output_results)
                output_order))
 end
+
+(* let num_loops = Einsum.num_loops kernel
+                    and parallel_loops = Einsum.parallel_loops kernel
+                    and accesses = Einsum.accesses kernel
+                    and indexing_maps = Einsum.indexing_maps kernel in
+                    (* let output_value =
+                      match StringMap.find_opt output !last_output_results with
+                      | Some result ->
+                        (* use last result *)
+                        result
+                      | None ->
+                        (* initialize empty output tensor *)
+                        let output_type = StringMap.find output tensors in
+                        (* DICLAIMER: this will get cleaned up by cse/canonicalize passes *)
+                        let dims =
+                          List.init output_type#rank (fun i ->
+                            let constant =
+                              Arith.constant (IntegerAttr.get index i) location context
+                            in
+                            body#append_operation constant;
+                            constant#result 0)
+                        in
+                        let empty = Tensor.empty dims output_type location in
+                        body#append_operation empty;
+                        (* remember the last result for this output tensor *)
+                        let last_result = empty#result 0 in
+                        last_output_results
+                        := StringMap.add output last_result !last_output_results;
+                        last_result
+                    in
+                    let input_values =
+                      List.tl accesses
+                      |> List.map (fun (`Access (input, _)) ->
+                        match List.find_index (String.equal input) input_order with
+                        | Some index -> (body#argument index :> Value.t)
+                        | None ->
+                          (StringMap.find input !last_output_results :> Value.t))
+                    in
+                    let kernel =
+                      Linalg.generic
+                        context
+                        input_values
+                        [ output_value ]
+                        (List.tl indexing_maps @ [ List.hd indexing_maps ])
+                        (List.init num_loops (fun i ->
+                          if IntSet.mem i parallel_loops
+                          then "parallel"
+                          else "reduction"))
+                        location
+                        ~init:(fun body ->
+                          let value, _ =
+                            to_arith
+                              location
+                              body
+                              (IntSet.cardinal parallel_loops)
+                              (ref 0)
+                              expr
+                          in
+                          let reduce =
+                            Arith.addf
+                              value
+                              (body#argument (List.length input_values))
+                              location
+                          in
+                          body#append_operation reduce;
+                          [ (reduce#result 0 :> Value.t) ])
+                    in
+                    body#append_operation kernel; *)
+                    [ (kernel#result 0 :> Value.t) ] *)

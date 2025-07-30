@@ -108,7 +108,7 @@ module Einsum (Env : Environment) = struct
   include Env
 
   type t =
-    [ `Declare of tensor_id * SparseTensorEncodingAttr.t
+    [ `Declare of tensor_id * RankedTensorType.t
     | `Assign of [ `Access of tensor_id * subscript ] * TensorExpr.t
     | `Sequence of t * t
     ]
@@ -171,27 +171,40 @@ module Einsum (Env : Environment) = struct
       | LevelType.Singleton (props, _) -> Printf.sprintf "Singleton%s" (repr_props props)
       | LevelType.Structured (n, m, _) -> Printf.sprintf "Structured[%d:%d]" n m
     in
-    let repr_format format =
-      match
-        StringMap.find_first_opt
-          (fun name -> Attribute.equal format (StringMap.find name named_formats))
-          named_formats
-      with
-      | Some (name, _) -> "#" ^ name
+    let repr_type t =
+      let dim_sizes =
+        List.init t#rank (fun dim ->
+          match t#dimension_size dim with
+          | ShapedType.Static size -> size
+          | ShapedType.Dynamic -> SyntaxError "Dynamic sizes are unsupported!" |> raise)
+      in
+      match t#encoding with
+      | Some format ->
+        (match
+           StringMap.find_first_opt
+             (fun name -> Attribute.equal format (StringMap.find name named_formats))
+             named_formats
+         with
+         | Some (name, _) -> "#" ^ name
+         | None ->
+           let dim_to_lvl = format#dimensions_to_levels in
+           Printf.sprintf
+             "Tensor<%s>{%s}"
+             (List.map Int.to_string dim_sizes |> String.concat ", ")
+             (List.init dim_to_lvl#results (fun i ->
+                Printf.sprintf
+                  "%s{%s}"
+                  (format#level_type i |> repr_level_type)
+                  (dim_to_lvl#result i |> print_as_string AffineExpr.print))
+              |> String.concat ", "))
       | None ->
-        let dim_to_lvl = format#dimensions_to_levels in
         Printf.sprintf
-          "Tensor{(%s) -> Levels{%s}}"
-          (List.init dim_to_lvl#dims (Printf.sprintf "d%d") |> String.concat ", ")
-          (List.init dim_to_lvl#results (fun i ->
-             Printf.sprintf
-               "(%s) : %s"
-               (dim_to_lvl#result i |> print_as_string AffineExpr.print)
-               (format#level_type i |> repr_level_type))
-           |> String.concat ", ")
+          "Tensor<%s>{%s}"
+          (List.map Int.to_string dim_sizes |> String.concat ", ")
+          (List.init t#rank (fun _ -> "Dense") |> String.concat ", ")
     in
     function
-    | `Declare (tensor, format) -> Printf.sprintf "%s : %s" tensor (repr_format format)
+    | `Declare (tensor, format) -> Printf.sprintf "%s : %s" tensor (repr_type format)
     | `Assign (`Access (tensor, subscript), expr) ->
       Printf.sprintf
         "%s%s = %s"
@@ -207,7 +220,7 @@ module Einsum (Env : Environment) = struct
 
   (** [tensors ast] returns a map of all tensors and their formats declared in the program *)
   let rec tensors = function
-    | `Declare (tensor, format) -> StringMap.singleton tensor format
+    | `Declare (tensor, t) -> StringMap.singleton tensor t
     | `Sequence (first, second) ->
       StringMap.union
         (fun tensor _ _ ->
@@ -218,7 +231,7 @@ module Einsum (Env : Environment) = struct
 
   (** [assignments ast] returns all the tensor assignments (kernels) in the given program *)
   let rec assignments = function
-    | `Assign (access, expr) -> [ `Assign (access, expr) ]
+    | `Assign (_, _) as assign -> [ assign ]
     | `Sequence (first, second) -> assignments first @ assignments second
     | _ -> []
 
@@ -231,6 +244,30 @@ module Einsum (Env : Environment) = struct
       | _ -> []
     in
     access :: collect_accesses expr
+
+  let inputs_and_outputs assignments =
+    let output_order =
+      List.map (fun (`Assign (`Access (output, _), _)) -> output) assignments
+    in
+    let rec inputs = function
+      | [] -> StringSet.empty
+      | `Assign (_, expr) :: assignments ->
+        let rec collect = function
+          | `Access (input, _) -> StringSet.singleton input
+          | `Unary (_, expr) -> collect expr
+          | `Binary (_, e1, e2) -> StringSet.union (collect e1) (collect e2)
+          | _ -> StringSet.empty
+        in
+        StringSet.union (collect expr) (inputs assignments)
+    in
+    let input_order =
+      List.fold_left
+        (fun map out -> StringSet.remove out map)
+        (inputs assignments)
+        output_order
+      |> StringSet.to_list
+    in
+    input_order, output_order
 
   (** [num_loops assignment] returns the number of loops (index variables) contained in the tensor assignment *)
   let num_loops (`Assign ((`Access (_, _) as access), expr)) =
@@ -294,14 +331,14 @@ module Einsum (Env : Environment) = struct
       if StringMap.mem tensor tensors |> not
       then SyntaxError (Printf.sprintf "Undefined tensor %s!" tensor) |> raise
       else (
-        let format = StringMap.find tensor tensors in
+        let tensor_type = StringMap.find tensor tensors in
         let access_rank = List.length subscript in
-        if format#level_rank != access_rank
+        if tensor_type#rank != access_rank
         then
           SyntaxError
             (Printf.sprintf
                "Mismatched access to a %d-dimensional tensor %s, used %d indices"
-               format#level_rank
+               tensor_type#rank
                tensor
                access_rank)
           |> raise
@@ -323,12 +360,32 @@ module Einsum (Env : Environment) = struct
         else
           `Access
             ( tensor
-            , List.mapi
-                (fun i index ->
-                   if format#level_type i |> has_dense_semantics
-                   then index
-                   else sparse_admissible index)
-                subscript ))
+            , match tensor_type#encoding with
+              | Some format ->
+                let lvl_to_dim = format#levels_to_dimensions in
+                let results = List.init lvl_to_dim#results lvl_to_dim#result in
+                List.mapi
+                  (fun i index ->
+                     match
+                       List.find_index
+                         (function
+                           | AffineExpr.Dim (d, _) -> d = i
+                           | _ -> false)
+                         results
+                     with
+                     | Some lvl ->
+                       if format#level_type lvl |> has_dense_semantics
+                       then index
+                       else sparse_admissible index
+                     | None ->
+                       SyntaxError
+                         (Printf.sprintf
+                            "Accessed tensor %s is not indexed by %d-th dimension!"
+                            tensor
+                            i)
+                       |> raise)
+                  subscript
+              | None -> subscript ))
     in
     let rec validate_expr = function
       | `Access (tensor, subscript) -> validate_access false (`Access (tensor, subscript))
@@ -346,14 +403,3 @@ module Einsum (Env : Environment) = struct
     in
     validate_ast prog
 end
-
-(* let rec collect_ *)
-(* TODO: infer affine maps
-  - If an index variable is defined in the iteration space (of the destination tensor)
-    but does not appear in the expression of a tensor operand, the tensor operand
-    is broadcast along the dimension represented by the index variable.
-  - If an index variable appears in the expression of some tensor operands
-    but not in the expression of the destination tensor,
-    then the corresponding dimension is reduced on the smallest sub-expression that captures the use
-    of the index variable, i.e.
-      Not D(i) = sum(j, A(i, j) + B(i, j), broadcast(j, C(i))), but D(i) = sum(j, A(i, j) + B(i, j)) + C(i)*)

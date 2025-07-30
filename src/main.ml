@@ -3,6 +3,7 @@ open Frontend
 open Ir
 module Einsum = Einsum (GlobalEnvironment)
 module Linalg = Linalg (GlobalEnvironment)
+module TensorRuntime = TensorRuntime (GlobalEnvironment)
 
 let usage_msg = "sparse-opt [-verbose] <file1> [<file2>] ... -o <output>"
 
@@ -14,20 +15,13 @@ let () =
     (fun file ->
        match parse_ast file with
        | Ok ast ->
-         print_endline (Einsum.repr ast);
-         let module_op = (Linalg.lower ast)#to_operation in
-         print_string (Mlir.print_as_string Mlir.Ir.Operation.print module_op);
-         let pass_manager = Mlir.PassManager.get Einsum.context in
-         (match
-            pass_manager#as_op_pass_manager#add_pipeline
-              "sparse-reinterpret-map,sparsification,canonicalize,cse"
-          with
-          | Mlir.LogicalResult.Failure, Some error -> print_endline error
-          | Mlir.LogicalResult.Failure, None -> print_endline ":///"
-          | _ -> ());
-         (match pass_manager#run_on_op module_op with
-          | Mlir.LogicalResult.Success ->
-            print_string (Mlir.print_as_string Mlir.Ir.Operation.print module_op)
-          | Mlir.LogicalResult.Failure -> print_endline ":(((((")
+         let filename = Filename.basename file |> Filename.remove_extension in
+         let mlir_filename = filename ^ ".mlir" in
+         let mlir_module = TensorRuntime.generate ast in
+         let mlir_file = open_out mlir_filename in
+         Printf.fprintf mlir_file "%s" (Mlir.print_as_string Mlir.Ir.Operation.print mlir_module#to_operation);
+         close_out mlir_file;
+         let _ = Sys.command ("mlir-translate --mlir-to-llvmir " ^ mlir_filename ^ " | llc -O3 --filetype=obj > " ^ filename ^ ".o") in
+         ()
        | Error err -> Printf.eprintf "%s\n" err)
     !input_files

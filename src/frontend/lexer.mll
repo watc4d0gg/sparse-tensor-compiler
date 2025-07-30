@@ -21,7 +21,8 @@ rule read = parse
     
     | dim_id            { DIM_ID (Lexing.lexeme lexbuf |> fun lex -> String.sub lex 1 (String.length lex - 1) |> int_of_string) }
     | "Tensor"          { TENSOR_DECL }
-    | "Levels"          { LEVELS_DECL }
+    | "Matrix"          { MATRIX_DECL }
+    | "Vector"          { VECTOR_DECL }
     | "ceildiv"         { CEILDIV }
     | "floordiv"        { FLOORDIV }
     | "Dense"           { DENSE }
@@ -46,8 +47,8 @@ rule read = parse
     | ']'               { RBRACKET }
     | '{'               { LBRACE }
     | '}'               { RBRACE }
-    (* | '<'               { LT }
-    | '>'               { GT } *)
+    | '<'               { LT }
+    | '>'               { GT }
     | "->"              { ARROW }
     | ','               { COMMA }
     | ':'               { COLON }
