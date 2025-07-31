@@ -2,8 +2,7 @@ open Core
 open Frontend
 open Ir
 module Einsum = Einsum (GlobalEnvironment)
-module Linalg = Linalg (GlobalEnvironment)
-module TensorRuntime = TensorRuntime (GlobalEnvironment)
+module IR = IR (GlobalEnvironment)
 
 let usage_msg = "sparse-opt [-verbose] <file1> [<file2>] ... -o <output>"
 
@@ -17,11 +16,21 @@ let () =
        | Ok ast ->
          let filename = Filename.basename file |> Filename.remove_extension in
          let mlir_filename = filename ^ ".mlir" in
-         let mlir_module = TensorRuntime.generate ast in
+         let mlir_module = IR.lower ast in
          let mlir_file = open_out mlir_filename in
-         Printf.fprintf mlir_file "%s" (Mlir.print_as_string Mlir.Ir.Operation.print mlir_module#to_operation);
+         Printf.fprintf
+           mlir_file
+           "%s"
+           (Mlir.print_as_string Mlir.Ir.Operation.print mlir_module#to_operation);
          close_out mlir_file;
-         let _ = Sys.command ("mlir-translate --mlir-to-llvmir " ^ mlir_filename ^ " | llc -O3 --filetype=obj > " ^ filename ^ ".o") in
+         let _ =
+           Sys.command
+             ("mlir-translate --mlir-to-llvmir "
+              ^ mlir_filename
+              ^ " | llc -O3 -filetype=obj > "
+              ^ filename
+              ^ ".o")
+         in
          ()
        | Error err -> Printf.eprintf "%s\n" err)
     !input_files

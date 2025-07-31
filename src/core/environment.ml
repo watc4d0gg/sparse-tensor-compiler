@@ -15,10 +15,10 @@ end
 
 (* TODO: narrow down the number of loaded dialects into memory *)
 module GlobalEnvironment : Environment = struct
-
   let type_id =
     let alloc = Mlir.TypeIdAllocator.get () in
     alloc#allocate
+
   let dialect_registry =
     let registry = DialectRegistry.get () in
     register_all_dialects registry;

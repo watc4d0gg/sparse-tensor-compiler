@@ -125,8 +125,8 @@ module Einsum (Env : Environment) = struct
                0
                [ AffineExpr.dim context 0; AffineExpr.dim context 1 ])
             None
-            None
-            None
+            (Some 64)
+            (Some 64)
             None
             None )
       ; ( "CSC"
@@ -139,8 +139,8 @@ module Einsum (Env : Environment) = struct
                0
                [ AffineExpr.dim context 1; AffineExpr.dim context 0 ])
             None
-            None
-            None
+            (Some 64)
+            (Some 64)
             None
             None )
       ]
