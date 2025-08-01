@@ -99,7 +99,7 @@ module IR (Env : Environment) = struct
 
   (* The pass pipeline for lowering the generated MLIR IR (linalg, func, sparse_tensor, etc.) into LLVMIR *)
   let llvm_pipeline =
-      "sparse-assembler{direct-out},sparsification-and-bufferization,sparse-storage-specifier-to-llvm,convert-linalg-to-loops,convert-vector-to-scf,expand-realloc,convert-scf-to-cf,expand-strided-metadata,finalize-memref-to-llvm,convert-func-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,canonicalize,cse"
+    "sparse-assembler{direct-out},sparsification-and-bufferization,sparse-storage-specifier-to-llvm,convert-linalg-to-loops,expand-realloc,convert-scf-to-cf,expand-strided-metadata,finalize-memref-to-llvm,convert-func-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,canonicalize,cse"
 
   let rec to_arith location body output_rank access_counter = function
     | `Constant c ->
@@ -208,45 +208,49 @@ module IR (Env : Environment) = struct
       [ Identifier.get context "llvm.emit_c_interface", Attribute.unit context ]
       location
       ~init:(fun body ->
-        let tensor_value = match input_type#encoding with
-        | Some _ -> 
-          let dense_type = RankedTensorType.get
-          (List.init input_type#rank input_type#dimension_size)
-          input_type#element_type
-          None
-          location
-          in
-          let dense = OpBuilder.get "sparse_tensor.convert" location
-            |> OpBuilder.add_operands [ body#argument 0 ]
-            |> OpBuilder.add_results [ dense_type ]
-            |> OpBuilder.build true
-          in
-          body#append_operation dense;
-          let insert =
-            Tensor.insert
-              (body#argument (body#arguments - 1))
-              (dense#result 0)
-              (List.init (body#arguments - 2) (fun i -> body#argument (i + 1)))
-              location
-          in
-          body#append_operation insert;
-          let sparse = OpBuilder.get "sparse_tensor.convert" location
-            |> OpBuilder.add_operands [ insert#result 0 ]
-            |> OpBuilder.add_results [ input_type ]
-            |> OpBuilder.build true
-          in
-          body#append_operation sparse;
-          sparse#result 0
-        | None -> 
-          let insert =
-            Tensor.insert
-              (body#argument (body#arguments - 1))
-              (body#argument 0)
-              (List.init (body#arguments - 2) (fun i -> body#argument (i + 1)))
-              location
-          in
-          body#append_operation insert;
-          insert#result 0
+        let tensor_value =
+          match input_type#encoding with
+          | Some _ ->
+            let dense_type =
+              RankedTensorType.get
+                (List.init input_type#rank input_type#dimension_size)
+                input_type#element_type
+                None
+                location
+            in
+            let dense =
+              OpBuilder.get "sparse_tensor.convert" location
+              |> OpBuilder.add_operands [ body#argument 0 ]
+              |> OpBuilder.add_results [ dense_type ]
+              |> OpBuilder.build true
+            in
+            body#append_operation dense;
+            let insert =
+              Tensor.insert
+                (body#argument (body#arguments - 1))
+                (dense#result 0)
+                (List.init (body#arguments - 2) (fun i -> body#argument (i + 1)))
+                location
+            in
+            body#append_operation insert;
+            let sparse =
+              OpBuilder.get "sparse_tensor.convert" location
+              |> OpBuilder.add_operands [ insert#result 0 ]
+              |> OpBuilder.add_results [ input_type ]
+              |> OpBuilder.build true
+            in
+            body#append_operation sparse;
+            sparse#result 0
+          | None ->
+            let insert =
+              Tensor.insert
+                (body#argument (body#arguments - 1))
+                (body#argument 0)
+                (List.init (body#arguments - 2) (fun i -> body#argument (i + 1)))
+                location
+            in
+            body#append_operation insert;
+            insert#result 0
         in
         [ tensor_value ])
 
@@ -371,19 +375,22 @@ module IR (Env : Environment) = struct
                kernels;
              (* return all the final referencing values to each output tensor in order *)
              List.map (fun output -> StringMap.find output !output_results) outputs))
-    (* |> (fun this ->
-      let clone = this#to_operation#clone in
-      let pass_manager = PassManager.get context in
-      (match pass_manager#as_op_pass_manager#add_pipeline "sparse-assembler,sparsifier{enable-runtime-library=false}" with
-      | LogicalResult.Failure, Some error -> LoweringError error |> raise
-      | LogicalResult.Failure, None ->
-        LoweringError "Unable to initialize the pass pipeline for LLVM lowering!" |> raise
-      | _, _ -> ());
-      (match pass_manager#run_on_op clone with
-      | LogicalResult.Success -> ()
-      | LogicalResult.Failure ->
-        LoweringError "Unable to lower the generated IR module!" |> raise);
-      print_as_string Operation.print clone |> print_string;
-      this) *)
-      |> lower_to_llvm
+    |> (fun this ->
+    let clone = this#to_operation#clone in
+    let pass_manager = PassManager.get context in
+    (match
+       pass_manager#as_op_pass_manager#add_pipeline
+         "sparse-assembler{direct-out},sparsification-and-bufferization,convert-linalg-to-loops,expand-realloc,expand-strided-metadata,finalize-memref-to-llvm,canonicalize,cse"
+     with
+     | LogicalResult.Failure, Some error -> LoweringError error |> raise
+     | LogicalResult.Failure, None ->
+       LoweringError "Unable to initialize the pass pipeline for LLVM lowering!" |> raise
+     | _, _ -> ());
+    (match pass_manager#run_on_op clone with
+     | LogicalResult.Success -> ()
+     | LogicalResult.Failure ->
+       LoweringError "Unable to lower the generated IR module!" |> raise);
+    print_as_string Operation.print clone |> print_string;
+    this)
+    |> lower_to_llvm
 end
